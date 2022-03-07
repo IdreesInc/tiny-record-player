@@ -3,16 +3,14 @@ let https = require('https');
 let NFC = require("./nfc");
 let { exec } = require("child_process");
 
-let secrets = JSON.parse(fs.readFileSync('./secret-stuff.json', 'utf8'));
 let config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
 
 let connected = false;
 
 async function init() {
     console.log("Spinning up Tiny Record Player!");
-
+    console.log("Connecting to SubWOOFer...");
     connectToSpeaker();
-
     let authenticateResponse = await authenticate();
     if (authenticateResponse && authenticateResponse.access_token) {
         console.log("Authentication successful!");
@@ -22,6 +20,7 @@ async function init() {
         return;
     }
     let accessToken = authenticateResponse.access_token;
+    // console.log(await getConnectedDevices(accessToken));
 
     let nfc = new NFC();
     nfc.poll((id) => {
@@ -30,7 +29,11 @@ async function init() {
             let record = config.records[id];
             console.log("Tag matched to record '" + record.name + "'");
             console.log(record);
-            playFromUri(accessToken, record.uri);
+            if (connected) {
+                playFromUri(accessToken, record.uri, config.spotifyd_device);
+            } else {
+                playFromUri(accessToken, record.uri);
+            }
         } else {
             console.log("No record found for tag " + id);
         }
@@ -43,18 +46,22 @@ async function connectToSpeaker() {
     }
     exec("bluetoothctl connect " + config.bluetooth_mac_address, (error, stdout, stderr) => {
         if (error || stderr) {
-            if (error) {
-                console.error(`error: ${error.message}`);
+            if (connected) {
+                if (error) {
+                    console.error(`error: ${error.message}`);
+                }
+                if (stderr) {
+                    console.error(`stderr: ${stderr}`);
+                }
+                connected = false;
             }
-            if (stderr) {
-                console.error(`stderr: ${stderr}`);
-            }
-            connected = false;
-            setTimeout(connectToSpeaker, 1000);
+            setTimeout(connectToSpeaker, 2500);
         } else {
-            console.log(stdout);
-            connected = true;
-            setTimeout(connectToSpeaker, 5000);
+            if (!connected) {
+                console.log(stdout);
+                connected = true;
+            }
+            setTimeout(connectToSpeaker, 60000);
         }
     });
 }
@@ -62,7 +69,7 @@ async function connectToSpeaker() {
 async function authenticate() {
     let body = new URLSearchParams({
         "grant_type": "refresh_token",
-        "refresh_token": secrets.refresh_token
+        "refresh_token": config.refresh_token
     }).toString();
     
     let options = {
@@ -72,7 +79,7 @@ async function authenticate() {
         headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
             'Content-Length': Buffer.byteLength(body),
-            'Authorization': 'Basic ' + Buffer.from(secrets.client_id + ':' + secrets.client_secret).toString('base64')
+            'Authorization': 'Basic ' + Buffer.from(config.client_id + ':' + config.client_secret).toString('base64')
         }
     };
     
@@ -102,26 +109,30 @@ async function authenticate() {
     });
 }
 
-async function getCurrentlyPlaying(accessToken, callback) {
+async function getCurrentlyPlaying(accessToken) {
     return get(accessToken, '/v1/me/player/currently-playing');
 }
 
-async function playFromUri(accessToken, uri, callback) {
+async function getConnectedDevices(accessToken) {
+    return get(accessToken, '/v1/me/player/devices');
+}
+
+async function playFromUri(accessToken, uri, deviceId) {
     if (uri.includes("track")) {
-        return playTrack(accessToken, uri);
+        return playTrack(accessToken, uri, deviceId);
     } else if (uri.includes("album")) {
-        return playAlbum(accessToken, uri);
+        return playAlbum(accessToken, uri, deviceId);
     } else {
         console.error("Unsupported URI: " + uri);
     }
 }
 
-async function playAlbum(accessToken, contextUri) {
-    return put(accessToken, '/v1/me/player/play', { context_uri: contextUri });
+async function playAlbum(accessToken, contextUri, deviceId) {
+    return put(accessToken, '/v1/me/player/play' + (deviceId ? `?device_id=${deviceId}` : ""), { context_uri: contextUri });
 }
 
-async function playTrack(accessToken, uri) {
-    return put(accessToken, '/v1/me/player/play', { uris: [uri] });
+async function playTrack(accessToken, uri, deviceId) {
+    return put(accessToken, '/v1/me/player/play' + (deviceId ? `?device_id=${deviceId}` : ""), { uris: [uri] });
 }
 
 async function get(accessToken, path) {
@@ -134,6 +145,7 @@ async function get(accessToken, path) {
             'Authorization': 'Bearer ' + accessToken
         }
     };
+    console.log("GET: " + path);
     return new Promise((resolve) => {
         let req = https.request(options, res => {
             console.log(`statusCode: ${res.statusCode}`);
@@ -158,7 +170,7 @@ async function get(accessToken, path) {
     });
 }
 
-async function put(accessToken, path, body, callback) {
+async function put(accessToken, path, body) {
     let options = {
         hostname: 'api.spotify.com',
         path: path,
@@ -168,6 +180,7 @@ async function put(accessToken, path, body, callback) {
             'Authorization': 'Bearer ' + accessToken
         }
     };
+    console.log("PUT: " + path);
     return new Promise((resolve) => {
         let req = https.request(options, res => {
             console.log(`statusCode: ${res.statusCode}`);
